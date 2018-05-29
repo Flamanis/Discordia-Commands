@@ -13,7 +13,7 @@ Command._defaultOptions = {
 }
 
 Command._commandOptions = {
-	ignoreCase = true, --Sets if the command is case insensitive
+	ignoreCase = false, --Sets if the command is case insensitive
 	description = "", --Sets the description of the command (For help command functionality)
 	longDescription = "", --Sets the long description of the command (For help command functionality)
 	usage = "", --Sets the usage of the command (For help command functionality)
@@ -23,8 +23,8 @@ Command._commandOptions = {
 	params = {}, --Parameter options
 	parameters = {}, --See above, mutally exclusive
 	aliases = {}, --Aliases for the command name
-	name = "", --Name of command
-	func = "" --Function to run for command
+	name = "", --Name of command REQUIRED
+	func = "" --Function to run for command REQUIRED
 }
 
 
@@ -40,7 +40,7 @@ end
 
 local function splitArgs(self, str)
 	--Our table to return the split args
-  local outTbl = {}
+  	local outTbl = {}
 	--Counter of what arg we're on
 	local i = 1
 	local lastArg = 1
@@ -81,8 +81,14 @@ local function splitArgs(self, str)
 		end
 		i = i + 1
 	end
-	if not ignoreLast then
+	if not ignoreLast and i ~= 1 then
 		table.insert(outTbl,str:sub(lastArg))
+	end
+	if(#outTbl < self._reqArgs) then
+		return "Not enough arguments provided to command"
+	end
+	if(#outTbl > self._numArgs and not self._allowExtra) then
+		return "Too many arguments provided to command"
 	end
   return outTbl
 end
@@ -106,6 +112,7 @@ function Command:__init(cmdHandler, env)
 	--Register defaults
 	self._aliases = {}
 	self._paramOptions = {}
+	self._reqArgs = self._defaultOptional and 0 or self._numArgs
 	for i=1, self._numArgs do
 		if not self._paramOptions[i] then
 			self._paramOptions[i] = {optional = self._defaultOptional}
@@ -123,7 +130,6 @@ function Command:__init(cmdHandler, env)
 	self:setDescription(env.description)
 	self:setLongDescription(env.longDescription)
 	self:setUsage(env.usage)
-	self:addPreconditions(env.preconditions)
 	if env.aliases then
 		self:addAliases(type(env.aliases) == 'table' and table.unpack(env.aliases) or env.aliases)
 	end
@@ -132,6 +138,13 @@ function Command:__init(cmdHandler, env)
 	  local paramTbl = env.params or env.parameters
 	  self:setParametersOptions(paramTbl)
 	end
+
+	self._preconditions = {}
+	if env.preconditions then
+		self:addPreconditions(env.preconditions)
+	end
+
+
 	if self._err then self._notValid = true return end
 
 end
@@ -208,30 +221,30 @@ function Command:setParametersOptions(paramTbl)
 	for k,v in pairs(paramTbl) do
 		--Use our getArg func to find the argument "index" in the names
 		local args = getArg(self._paramNames, k)
-
-		if args then
+		if args and args <= self._numArgs then
 			if type(v) == 'table' then
-					if v.optional and type(v.optional) == 'boolean' then
-						self._paramOptions[args].optional = v.optional
-					elseif v[1] and type(v[1]) == 'boolean' then
-						self._paramOptions[args].optional = v[1]
-					end
-					if v.remainder and type(v.remainder) == 'boolean' then
-						if args ~= self._numArgs then
-							self._err = ('Remainder parameter must be the final parameter')
-							return
-						elseif self._allowExtra then
-							self._err = ('Remainder cannot be applied to a command that allows overflow')
-							return
-						end
-						self._paramOptions[args].remainder = v.remainder
-					end
-
-				elseif type(v) == 'boolean' then
-					self._paramOptions[args].optional = v
+				if v.optional ~= nil and type(v.optional) == 'boolean' then
+					self._paramOptions[args].optional = v.optional
+				elseif v[1] ~= nil and type(v[1]) == 'boolean' then
+					self._paramOptions[args].optional = v[1]
 				end
+				if v.remainder and type(v.remainder) == 'boolean' then
+					if args ~= self._numArgs then
+						self._err = ('Remainder parameter must be the final parameter')
+						return
+					elseif self._allowExtra then
+						self._err = ('Remainder cannot be applied to a command that allows overflow')
+						return
+					end
+					self._paramOptions[args].remainder = v.remainder
+				end
+
+			elseif type(v) == 'boolean' then
+				self._paramOptions[args].optional = v
+			end
 		end
 	end
+	local foundReq = 0
 	local foundOptional = false
 	for i = 1, self._numArgs do
 		if(not self._paramOptions[i].optional and foundOptional) then
@@ -239,8 +252,11 @@ function Command:setParametersOptions(paramTbl)
 			return
 		elseif(self._paramOptions[i].optional) then
 			foundOptional = true
+		else
+			foundReq = foundReq + 1
 		end
 	end
+	self._reqArgs = foundReq
 	return self
 end
 
@@ -248,9 +264,25 @@ function Command:setParameterOptions(param, options)
 	return setParametersOptions(self, {[param] = options})
 end
 
---Todo Actually do preconditions, and allow for adding to handler
-function Command:addPreconditions(...)
 
+
+function Command:addPreconditions(preconditions)
+	for k,v in pairs(preconditions) do
+		if type(v) == 'string' then
+			table.insert(self._preconditions,{v})
+		elseif type(v) == 'table' then
+			local name, args
+			name = v[1] or v.name
+			if not name then 
+				self._err = string.format("Precondition must have a name")
+				return
+			end
+			table.insert(self._preconditions,{name,v[2] or v.args})
+		else
+			self._err = string.format("Precondition name is of invalid type")
+		end
+	end
+	return self
 end
 
 
@@ -269,12 +301,13 @@ end
 
 
 function Command:_run(client, message, args)
-	local context = {message = message,
+	local context = {
+		message = message,
 		guild = message.guild,
 		channel = message.channel,
 		author = message.author,
-		member = message.member,
-	  client = client}
+		member = message.member
+	}
 	local fenv = getfenv(self._func)
 	fenv.context = context
 	setfenv(self._func, fenv)
@@ -309,6 +342,10 @@ end
 
 function get.usage(self)
 	return self._usage
+end
+
+function get.preconditions(self)
+	return self._preconditions
 end
 
 return Command

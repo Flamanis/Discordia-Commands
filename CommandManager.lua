@@ -5,6 +5,7 @@ local baseEnv = getfenv(0)
 local Command = require('./Command')
 local fs = require('fs')
 local preconditions = require('./Preconditions')
+local pp = require('pretty-print').prettyPrint
 
 local format = string.format
 
@@ -37,14 +38,17 @@ local function defaultHandler(self, msg)
 	if not prefix or not msg.content:startswith(prefix) then return end
 	--Match the command and the rest of the string
 	local cmd, args = msg.content:sub(prefix:len()+1):match('^(%S+)%s*(.*)')
-	--If there's no command, tell the user
-	if not cmd and self._echoErrors then return msg:reply('Error: Command not found.') end
 	--Get the command object if possible.
 	local command = self:getCommand(cmd)
+	--If there's no command, tell the user
+	if not command and self._options.echoErrors then return msg:reply('Error: Command not found.') end
 	--If we got one, for now just run the command
 	if command ~= nil then
-		if self:_checkPreconditions(msg, command.preconditions) then
+		local succ, err = self:_checkPreconditions(msg, command.preconditions)
+		if succ then
 			command:_run(self._client, msg, args)
+		elseif self._options.echoErrors then 
+			return msg:reply("Error: ".. err)
 		end
 	end
 end
@@ -114,7 +118,26 @@ function CommandManager:warning(str)
 	return self._client:warning(str)
 end
 
-function CommandManager:_checkPreconditions()
+function CommandManager:_checkPreconditions(msg, preconditions)
+	for k,v in pairs(preconditions) do
+		local name, args
+		if type(v) == 'string' then
+			name = v
+			args = nil
+		elseif type(v) == 'table' then
+			name = v[1] or v.name
+			if type(name) ~= 'string' then
+				return false, string.format("Precondition name must be a string")
+			end
+			args = v[2] or v.args
+		end
+		if self._preconditions[name] then
+			local succ, err = self._preconditions[name](args, self._client, msg, self, self._globals)
+			if not succ then return false, err end
+		else
+			return false, string.format("Precondition [%s] not found", name)
+		end
+	end
 	return true
 end
 
@@ -126,6 +149,7 @@ end
 
 --Function to get a command by name or alias
 function CommandManager:getCommand(name)
+	if not name  then return false end
 	--Check for exact match in commands and aliases
 	local command = self._commands[name] or self._aliases[name]
 	--Check for case insensitive match
@@ -346,8 +370,9 @@ function CommandManager:addGlobals(tbl)
 end
 
 
-
-
+function get.commands(self)
+	return self._commands
+end
 function get.prefix(self)
 	return self._prefix
 end
