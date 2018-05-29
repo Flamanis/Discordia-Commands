@@ -339,9 +339,8 @@ function CommandManager:loadCommands(filepath)
 	return comTbl
 end
 
-function CommandManager:addGlobals(...)
-	local args = {...}
-	for k,v in pairs(args) do
+function CommandManager:addGlobals(tbl)
+	for k,v in pairs(tbl) do
 		self._globals[k] = v
 	end
 end
