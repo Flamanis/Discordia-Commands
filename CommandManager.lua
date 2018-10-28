@@ -1,125 +1,182 @@
 local d = require('discordia')
 local class = d.class
-d.extensions()
+local extensions = require('./extensions')
 local baseEnv = getfenv(0)
 local Command = require('./Command')
 local fs = require('fs')
 local preconditions = require('./Preconditions')
 local pp = require('pretty-print').prettyPrint
+local typeReaders = require('./Typereaders')
 
 local format = string.format
 
 local CommandManager, get, set = class('CommandManager')
 CommandManager._description = "The client's handler of chat commands."
 
+--[[
+Manager Properties:
+All start with _ internally, access without outside.
+client - Discordia client object
+commands - array of command objects, keyed by name
+aliases - array of command objects, keyed by aliases
+isReady- bool of if ready to start reading chat
+globalPrefix - string prefix to use on all chats the bot is in
+guildPrefixes - array of string prefixes to use on specific guilds, if set to '' ignores guild
+preconditions - Precondition functions.
+globals - Globals to inject into commands.
+types - Typereader functions
 
-local function tblFind(tbl,val)
-	for k,v in pairs(tbl) do 
-		if v == val then 
-			return true
-		end 
-	end 
-	return false
+manager - the handler to use in messageCreate
+realManager - the function that subscribes the 'handler' function to messageCreate, used for loading/unloading.
+
+options - array of options for the manager
+
+
+defaultOptions - default options for commands, keys = properties in command object
+
+
+]]
+
+
+local managerOptions = {
+
+}
+
+
+local function messageManager(manager)
+	return function(msg) manager:_manager(msg) end
 end
 
-
-local function messageHandler(manager)
-	return function(msg) if not manager._isReady then return end manager:_handler(msg) end
-end
-
-local function defaultHandler(self, msg)
+local function defaultManager(self, msg)
+	if not self._isReady then return end
 	--Get bool of comparing if the author is the current user
 	local isUserMe = msg.author.id == self._client.user.id
 	--Check the flags of ignoring bots, others and self.
-	if msg.author.bot and self._options.ignoreBots or self._options.ignoreOthers and not isUserMe or self._options.ignoreSelf and isUserMe then return end
+	--if msg.author.bot and self._options.ignoreBots or self._options.ignoreOthers and not isUserMe or self._options.ignoreSelf and isUserMe then return end
 	--Get the prefix for the current context
-	local prefix = self:_getPrefix(msg)
+	local prefix = self:GetPrefix(msg)
 	--If there is no prefix returned (happens if only guild set) or the command doesn't start without prefix
-	if not prefix or not msg.content:startswith(prefix) then return end
+	if not prefix or not extensions.startswith(msg.content, prefix, true) then return end
 	--Match the command and the rest of the string
 	local cmd, args = msg.content:sub(prefix:len()+1):match('^(%S+)%s*(.*)')
 	--Get the command object if possible.
-	local command = self:getCommand(cmd)
+	local command, argTbl = self:GetCommand(cmd, msg, args)
 	--If there's no command, tell the user
-	if not command and self._options.echoErrors then return msg:reply('Error: Command not found.') end
+	if not command then return self:Fail(err) end
 	--If we got one, for now just run the command
-	if command ~= nil then
-		local succ, err = self:_checkPreconditions(msg, command.preconditions)
-		if succ then
-			command:_run(self._client, msg, args)
-		elseif self._options.echoErrors then 
-			return msg:reply("Error: ".. err)
-		end
-	end
+	command:_Run(self._client, msg, argTbl)
 end
 
---Default options for the manager. Does stuffs.
-local defaultOptions = {
-	ignoreBots = true,
-	ignoreSelf = true,
-	ignoreOthers = false,
-	echoErrors = true,
-	defaultHelpCommand = true, --Todo: still write this
-	description = 'A Discordia Discord bot'
-}
-CommandManager._defaultOptions = defaultOptions
 
---Function for setting the options of the handler
-function CommandManager:setOptions(options)
-	--If they sent us something and it's a table
-	if options and type(options) == 'table' then
-		--Loop through the options on the default options table. If it exists in the passed table then set it in our options
-		for k,v in pairs(defaultOptions) do
-			if options[k] ~= nil then
-				self._options[k] = options[k]
-			end
-		end
-		--Make sure that each type in our options table is the correct type.
-		--This could be one loop, but it's less readable.
-		for k,v in pairs(options) do
-			local a = type(v)
-			local b = type(defaultOptions[k])
-			if a ~= b then
-				return self:error(format('Invalid manager option type for %q: Expected %q, got %q',k, b, a))
-			end
+local function tblFind(tbl,val)
+	if not tbl then return nil end
+	for k,v in pairs(tbl) do
+		if v == val then
+			return k
 		end
 	end
+	return false
 end
 
---Initialization of class
 function CommandManager:__init(client)
 	--Initialization
 	self._client = client
 	self._commands = {}
 	self._aliases = {}
-	self._isReady = false
-	self._options = table.copy(defaultOptions)
+	self._isReady = true
+	self._options = extensions.copy(managerOptions)
+	self._globalPrefix = ''
 	self._guildPrefixes = {}
 	self._preconditions = preconditions
 	self._globals = {}
+	self._types = typeReaders
 
-	self._defaultCommandOptions = table.deepcopy(Command._defaultOptions)
+	self._defaultOptions = {}
 
 	--Handler initialization. _handler is a modifiable handler while _readHandler should never be changed.
-	self._handler = defaultHandler
-	self._realHandler = messageHandler(self)
-	client:on('messageCreate', self._realHandler)
+	self._manager = defaultManager
+	self._realManager = messageManager(self)
 end
 
---Function for errors
-function CommandManager:error(str)
-	--Pass errors to the client.
-	return self._client:error(str)
+function CommandManager:Error()
+
 end
 
---Function for warnings
-function CommandManager:warning(str)
-	--Pass warnings to the client.
-	return self._client:warning(str)
+function CommandManager:Fail()
+
 end
 
-function CommandManager:_checkPreconditions(msg, preconditions)
-	for k,v in pairs(preconditions) do
+
+function CommandManager:Start()
+	self._client:on('messageCreate', self._realManager)
+end
+
+function CommandManager:Stop()
+	self._client:off('messageCreate', self._realManager)
+end
+
+function CommandManager:Pause()
+	self._isReady = false
+end
+
+function CommandManager:Play()
+	self._isReady = true
+end
+
+function CommandManager:SetPrefix(prefix)
+	if not prefix then self._globalPrefix = nil return  end
+	if type(prefix) ~= 'string' then return self:Error(format('Prefix must be a string. Got %q', type(prefix))) end
+	self._globalPrefix = prefix
+	return
+end
+
+local function getGuild(guild)
+	--If we're a table, then we need to check some stuffs
+	local err = ''
+	if class.isInstance(guild, class.classes.Guild) then
+		guild = guild.id
+	elseif type(guild) ~= string or not tonumber(guild) then
+		err = format('Guild provided must be a string id or guild object. Got %q. Type:%q', guild, type(guild))
+	end
+	if err ~= '' then return false, err end
+	return true, guild
+end
+
+function CommandManager:SetGuildPrefix(guild, prefix)
+	--Attempt to get the guild based on id/object
+	local succ, guildToRegister = getGuild(guild)
+	if not succ then return self:Error(guildToRegister) end
+	--Then we check if the prefix is valid and error accordingly.
+	if type(prefix) ~= 'string' then
+		return self:Error(format('Guild (%q) prefix must be a string. Got %q', guild, type(prefix) ))
+	end
+	--If we made it here, we have good prefix!
+	self._guildPrefixes[guildToRegister] = prefix
+end
+
+
+function CommandManager:RemoveGuildPrefix(guild)
+	local succ, guildToDelete = getGuild(guild)
+	if not succ then return self:Error(guildToDelete) end
+	self._guildPrefixes[guildToDelete] = nil
+ end
+
+ function CommandManager:GetPrefix(msg)
+ 	if not msg or not class.isInstance(msg, class.classes.Message) then return nil end
+ 	--Get the prefix for the current context.
+ 	local pre = msg.guild and self._guildPrefixes[msg.guild.id] or self._globalPrefix
+	return pre
+end
+
+--Function to set the handler, no checks here just straight setting.
+--If the user want to change the handler, it's stuff is on them.
+function CommandManager:SetManager( func)
+	self._manager = func
+ end
+
+function CommandManager:_CheckPreconditions(msg, preconditions)
+	if type(preconditions) ~= 'table' then return false, format('Precondition names must be in a table. Got: %q', preconditions) end
+ 	for k,v in pairs(preconditions) do
 		local name, args
 		if type(v) == 'string' then
 			name = v
@@ -127,7 +184,7 @@ function CommandManager:_checkPreconditions(msg, preconditions)
 		elseif type(v) == 'table' then
 			name = v[1] or v.name
 			if type(name) ~= 'string' then
-				return false, string.format("Precondition name must be a string")
+				return false, format("Precondition name must be a string. Got: %q. Type:%q",name, type(name))
 			end
 			args = v[2] or v.args
 		end
@@ -135,210 +192,178 @@ function CommandManager:_checkPreconditions(msg, preconditions)
 			local succ, err = self._preconditions[name](args, self._client, msg, self, self._globals)
 			if not succ then return false, err end
 		else
-			return false, string.format("Precondition [%s] not found", name)
+			return false, format("Precondition (%s) not found", name)
 		end
 	end
 	return true
 end
 
---Function to get the prefix in the context of the message.
-function CommandManager:_getPrefix(msg)
-	--Get the prefix for the current context.
-	return msg.guild and self._guildPrefixes[msg.guild.id] or self._prefix
-end
-
---Function to get a command by name or alias
-function CommandManager:getCommand(name)
-	if not name  then return false end
-	--Check for exact match in commands and aliases
-	local command = self._commands[name] or self._aliases[name]
-	--Check for case insensitive match
-	name = name:lower()
-	--These two checks are a bit long, so I split it into multiple lines
-	--Check just the commands table
-	command = command or (self._commands[name] and self._commands[name]._caseInsensitive and self._commands[name])
-	--Check the aliases table
-	command = command or (self._aliases[name] and self._aliases[name]._caseInsensitive and self._aliases[name])
-	return command
+ --Function to update the aliases table when a command has them modified
+ function CommandManager:_RemoveAliases(cmd, tbl)
+	--Loop through the aliases of the command
+	for _,v in pairs(tbl) do
+		--If the command is case insensitive, set it to lowercase
+		if cmd.ignoreCase then
+			v = v:lower()
+		end
+		--Get the value at command table at the alias
+		local key = tblFind(self._aliases[v], cmd)
+			if key then
+			self._aliases[v][key] = nil
+		end
+	end
 end
 
 --Function to update the aliases table when a command has them modified
-function CommandManager:_updateAliases(cmd)
-	--Loop through the aliases of the command
-	for _,v in ipairs(cmd.aliases) do
-		--If the command is case insensitive, set it to lowercase
-		if cmd._caseInsensitive then
-			v = v:lower()
+ function CommandManager:_AddAliases(cmd, tbl)
+ 	--Loop through the aliases of the command
+ 	for _,v in pairs(tbl) do
+ 		--If the command is case insensitive, set it to lowercase
+ 		if cmd.ignoreCase then
+ 			v = v:lower()
+ 		end
+ 		--Get the value at command table at the alias
+ 		if not self._aliases[v] then
+			self._aliases[v] = {}
 		end
+		table.insert(self._aliases[v], cmd)
+ 	end
+ end
 
-		--Get the value at command table at the alias
-		local possibleAlias = self._aliases[tblFind(self._aliases,v)]
-
-		--If it's nil, set it to be cmd, if it's not then we need to send a warning message
-		if possibleAlias == nil then
-			self._aliases[v] = cmd
-		elseif possibleAlias ~= cmd then
-			self:warning(format("Confliction of alias (%s) from commands: %s and %s", v, cmd.name, possibleAlias.name))
-		end
-	end
+function CommandManager:AddGlobals(tbl)
+	if type(tbl) ~= 'table' then return end
+ 	for k,v in pairs(tbl) do
+ 		self._globals[k] = v
+ 	end
 end
 
---Create command and add to handler
-function CommandManager:create(name, func, options)
+ --Create command and add to handler
+ function CommandManager:Create(env)
+ 	--Generate a new one using the constructor
+	local cmd = env
+	if not class.isInstance(env, command) then
+ 		cmd = Command(self, env)
+	end
+ 	if cmd._notValid then return false, cmd._err end
+ 	--If we set it to be case insensitive then check that and set name as lower
+	local name = cmd.ignoreCase and cmd.name:lower() or cmd.name
+	if not self._commands[name] then
+		self._commands[name] = {}
+	end
+	table.insert(self._commands[name], cmd)
 
-	local opt = table.deepcopy(self._defaultCommandOptions)
-	if options then
-		for k,v in pairs(options) do
-			opt[k] = v
-		end
-	end
-	for k,v in pairs(Command._defaultOptions) do
-		local a = type(self._defaultCommandOptions[k])
-		local b = type(opt[k])
-		if a ~= b then
-			return self:error(format('Invalid option type given for command creation. Command: %q, Option %q. Expected %q, got %q', name, k, a, b))
-		end
-	end
-	opt.name = name
-	opt.func = func
-	--Generate a new one using the constructor
-	local cmd = Command(self, opt)
-	if cmd._notValid then return false, cmd._err end
-	--If we set it to be case insensitive then check that and set name as lower
-	if cmd.caseInsensitive then
-		self._commands[cmd.name:lower()] = cmd
-	else
-		self._commands[cmd.name] = cmd
-	end
-	--Return the newly generated command so that it can be used by the user if they wish
-	return cmd
+ 	--Return the newly generated command so that it can be used by the user if they wish
+ 	return cmd
 end
 
 --Remove command from handler
-function CommandManager:remove(command)
-	--Can remove by name/alias, so if we get that attempt to get the command
-	if type(command) == 'string' then
-		command = self:getCommand(command)
+function CommandManager:Remove(command)
+	if type(command) == 'table' and class.isInstance(command, Command) then
+		self:_RemoveAliases(command, command.aliases)
+		local name = command.ignoreCase and command.name:lower() or command.name
+		local key = tblFind(self._commands[name], command)
+		self._commands[name][key] = nil
 	end
-	--If we're a table and our class is "Command" then remove the name and aliases from the table
-	if type(command) == 'table' and command.isInstanceOf and command:isInstanceOf("Command") then
-		for a, v in pairs(command.aliases) do
-			if command.caseInsensitive then
-				v = v:lower()
-			end
-			self._aliases[v] = nil
+end
+
+local function cmdTblFind(tbl,val)
+	if not tbl then return nil end
+	for k,v in pairs(tbl) do
+		if v[1] == val then
+			return k
 		end
-		if command.caseInsensitive then
-			self._commands[command.name:lower()] = nil
+	end
+	return false
+end
+
+function CommandManager:Type(ty, arg, msg)
+	return self._types[ty](arg, msg)
+end
+
+local function score(manager, cmd, msg, args)
+	local precon, err = manager:_CheckPreconditions(msg, cmd.preconditions)
+	if not precon then return false, err  end
+	local sc = 0
+	local argsTbl = cmd:_SplitArgs(args)
+	local argsOut = {}
+	for k,v in ipairs(argsTbl) do
+		if cmd._params[k] then
+			local val, err = manager:Type(cmd._params[k].type, v, msg)
+			if val == nil then return false, err end
+			table.insert(argsOut, val)
+			sc = sc + 10
 		else
-			self._commands[command.name] = nil
+			table.insert(argsOut, v)
 		end
 	end
-end
-
---Function to set global prefix
-function CommandManager:setPrefix(prefix)
-	if type(prefix) ~= 'string' then return self:error("Prefix must be a string") end
-	--If function hasn't been called before, make us handle messages now
-	self:setReady()
-	self._prefix = prefix
-end
-
---Function to set the handler, no checks here just straight setting.
---If the user want to change the handler, it's stuff is on them.
-function CommandManager:setHandler( func)
-	self._handler = func
- end
-
-local function getGuild(guild)
-	--If we're a table, then we need to check some stuffs
-	if type(guild) == 'table' then
-		--If we're a class by having isInstanceOf, if not then it's a table that ain't good
-		if guild.isInstanceOf then
-			--If we're a guild, then get the guild id, otherwise error because you can only do guild.
-			if guild:isInstanceOf('Guild') then
-				guild = guild.id
-			else
-				return false, format('Invalid guild object type given: %q.', guild._name or guild)
-			end
-		else
-			return false, format('Invalid guild type given: table.')
-		end
-	--If we're not a string, then we say what type we are (number or func or nil) and how that is bad
-	elseif type(guild) ~= 'string' then
-		return false, format('Invalid guild type given: %q.', type(guild))
-	elseif not tonumber(guild) then
-		return false, format('Guild id must be a number. Got %q', guild)
-	end
-	return true, guild
-end
-
---Function to set a prefix for a guild. Takes an id or a guild object.
-function CommandManager:setGuildPrefix(guild, prefix)
-	--Attempt to get the guild based on id/object
-	local succ, guildToRegister = getGuild(guild)
-	if not succ then return self:error(guildToRegister) end
-	--Then we check if the prefix is valid and error accordingly.
-	if type(prefix) ~= 'string' then
-		return self:error(format('Invalid prefix type given for guild (%q): %q.', guild, type(prefix) ))
-	end
-	--If we made it here, we have good prefix!
-	self._guildPrefixes[guildToRegister] = prefix
-	self:setReady()
+	return {cmd, sc, argsOut}
 end
 
 
---Function to remove a registered prefix for a guild. Takes an id or a guild object.
-function CommandManager:removeGuildPrefix(guild)
-	local succ, guildToRegister = getGuild(guild)
-	if not succ then return self:warning(guildToRegister) end
-	self._guildPrefixes[guildToRegister] = nil
- end
-
---Function to set the ready status of the handler. used internally for prefixes and such.
---Allowed for use externally so that those that want to remake the handler can
-function CommandManager:setReady(bool)
-	bool = bool ~= false
-	if self._isReady ~= bool then self._isReady = bool end
-end
-
---Function to set the default options to pass to a command on initialization
-function CommandManager:setDefaultCommandOptions(options)
-	--Make sure we're a table
-	if type(options) == 'table' then
-		--This is the generic check for options.
-		for k,v in pairs(Command._defaultOptions) do
-			if options[k] ~= nil then
-				self._defaultCommandOptions[k] = v
-			end
-		end
-		for k,v in pairs(options) do
-			local optionType = type(v)
-			local defaultType = type(Command._defaultOptions[k])
-			if optionType ~= defaultType then
-				return self:error(format('Invalid default command option type for %q: Expected %q, got %q', k, defaultType, optionType))
+function CommandManager:GetCommand(name, msg, args)
+ 	if not name then return false end
+ 	local possCommands = {}
+	if self._commands[name] then
+		for k,v in ipairs(self._commands[name]) do
+			local val = score(self, v, msg, args)
+			if val then
+				val[2] = val[2] + 3
+				table.insert(possCommands, val)
 			end
 		end
 	end
-end
-
-local function min(...)
-	local args = {...}
-	local tbl = {}
-	for k,v in pairs(args) do
-		table.insert(tbl,v)
+	if self._aliases[name] then
+		for k,v in ipairs(self._aliases[name]) do
+			local val = score(self, v, msg, args)
+			if val then
+				val[2] = val[2] + 2
+				if not cmdTblFind(possCommands, val[1]) then
+					table.insert(possCommands, val)
+				end
+			end
+		end
 	end
-	if #tbl == 0 then return -1 end
-	return math.min(table.unpack(tbl))
+	name = name:lower()
+	if self._commands[name] then
+		for k,v in ipairs(self._commands[name]) do
+			local val = score(self, v, msg, args)
+			if val then
+				val[2] = val[2] + 2
+				if not cmdTblFind(possCommands, val[1]) then
+					table.insert(possCommands, val)
+				end
+			end
+		end
+	end
+	if self._aliases[name] then
+		for k,v in ipairs(self._aliases[name]) do
+			local val = score(self, v, msg, args)
+			if val then
+				val[2] = val[2] + 2
+				if not cmdTblFind(possCommands, val[1]) then
+					table.insert(possCommands, val)
+				end
+			end
+		end
+	end
+	if #possCommands == 0 then return false, 'Command not found' end
+	local max = {'err', -1,''}
+	for k,v in ipairs(possCommands) do
+		if v[2] > max[2] then
+			max = v
+		end
+	end
+	return max[1], max[3]
 end
 
-function CommandManager:loadCommands(filepath)
+
+function CommandManager:LoadCommands(filepath)
 	local str, err = fs.readFileSync(filepath)
-	if not str then return self:error(err) end
+	if not str then return self:Error(err) end
 	local func,err = loadstring(str)
-	if not func then return self:error(err) end
-	local env = table.copy(baseEnv)
-	
+	if not func then return self:Error(err) end
+	local env = extensions.copy(baseEnv)
+
 	for k,v in pairs(self._globals) do
 		env[k] = v
 	end
@@ -347,9 +372,9 @@ function CommandManager:loadCommands(filepath)
 
 	local function add()
 		local newEnv = getfenv(func)
-		local com, err = self:create(newEnv.name,newEnv.func,newEnv)
-		if not com then return self:error(string.format("Error in generating command #%d from file: %s\nError: %s", comCount, filepath, err)) end
-		for k,v in pairs(Command._commandOptions) do
+		local com, err = self:Create(newEnv)
+		if not com then return self:Error(format("Error in generating command #%d from file: %s\nError: %s", comCount, filepath, err)) end
+		for k,v in pairs(Command._optionTypes) do
 			newEnv[k] = nil
 		end
 		table.insert(comTbl, com)
@@ -357,37 +382,10 @@ function CommandManager:loadCommands(filepath)
 	end
 	env.add = add
 	env.client = self._client
-	env.handler = self
+	env.manager = self
 	setfenv(func,env)
 	func()
 	return comTbl
-end
-
-function CommandManager:addGlobals(tbl)
-	for k,v in pairs(tbl) do
-		self._globals[k] = v
-	end
-end
-
-
-function get.commands(self)
-	return self._commands
-end
-function get.prefix(self)
-	return self._prefix
-end
-
-function get.guildPrefixes(self)
-	return self._guildPrefixes
-end
-function get.options(self)
-	return self._options
-end
-function get.defaultOptions(self)
-	return self._defaultOptions
-end
-function get.defaultCommandOptions(self)
-	return self._defaultCommandOptions
 end
 
 
