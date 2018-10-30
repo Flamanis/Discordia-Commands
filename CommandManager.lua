@@ -1,6 +1,6 @@
 local d = require('discordia')
 local class = d.class
-local extensions = require('./extensions')
+local extensions = require('./Extensions')
 local baseEnv = getfenv(0)
 local Command = require('./Command')
 local fs = require('fs')
@@ -39,7 +39,8 @@ defaultOptions - default options for commands, keys = properties in command obje
 
 
 local managerOptions = {
-
+	failInChat = true,
+	errorLog = false
 }
 
 
@@ -52,7 +53,7 @@ local function defaultManager(self, msg)
 	--Get bool of comparing if the author is the current user
 	local isUserMe = msg.author.id == self._client.user.id
 	--Check the flags of ignoring bots, others and self.
-	--if msg.author.bot and self._options.ignoreBots or self._options.ignoreOthers and not isUserMe or self._options.ignoreSelf and isUserMe then return end
+	if msg.author.bot or isUserMe then return end
 	--Get the prefix for the current context
 	local prefix = self:GetPrefix(msg)
 	--If there is no prefix returned (happens if only guild set) or the command doesn't start without prefix
@@ -62,7 +63,7 @@ local function defaultManager(self, msg)
 	--Get the command object if possible.
 	local command, argTbl = self:GetCommand(cmd, msg, args)
 	--If there's no command, tell the user
-	if not command then return self:Fail(err) end
+	if not command then return self:Fail(msg, argTbl) end
 	--If we got one, for now just run the command
 	command:_Run(self._client, msg, argTbl)
 end
@@ -78,32 +79,44 @@ local function tblFind(tbl,val)
 	return false
 end
 
-function CommandManager:__init(client)
+function CommandManager:__init(client, options)
 	--Initialization
 	self._client = client
 	self._commands = {}
 	self._aliases = {}
 	self._isReady = true
 	self._options = extensions.copy(managerOptions)
+	for k,v in pairs(options) do
+		self._options[k] = v
+	end
 	self._globalPrefix = ''
 	self._guildPrefixes = {}
-	self._preconditions = preconditions
 	self._globals = {}
+
+	self._preconditions = preconditions
 	self._types = typeReaders
 
-	self._defaultOptions = {}
+	self._defaultOptions = {optionalParams = true}
 
 	--Handler initialization. _handler is a modifiable handler while _readHandler should never be changed.
 	self._manager = defaultManager
 	self._realManager = messageManager(self)
 end
 
-function CommandManager:Error()
-
+function CommandManager:Error(str)
+	if not self._options.errorLog then
+		return self._client:error(str)
+	else
+		return self._client:warning(str)
+	end
 end
 
-function CommandManager:Fail()
-
+function CommandManager:Fail(msg, str)
+	if self._options.failInChat then
+		return msg:reply(str)
+	else
+		return self._client:warning(str)
+	end
 end
 
 
@@ -112,7 +125,7 @@ function CommandManager:Start()
 end
 
 function CommandManager:Stop()
-	self._client:off('messageCreate', self._realManager)
+	self._client:removeListener('messageCreate', self._realManager)
 end
 
 function CommandManager:Pause()
@@ -124,10 +137,10 @@ function CommandManager:Play()
 end
 
 function CommandManager:SetPrefix(prefix)
-	if not prefix then self._globalPrefix = nil return  end
-	if type(prefix) ~= 'string' then return self:Error(format('Prefix must be a string. Got %q', type(prefix))) end
+	if not prefix then self._globalPrefix = '' return  end
+	if type(prefix) ~= 'string' then return false, format('Prefix must be a string. Got %q', type(prefix)) end
 	self._globalPrefix = prefix
-	return
+	return true
 end
 
 local function getGuild(guild)
@@ -135,7 +148,7 @@ local function getGuild(guild)
 	local err = ''
 	if class.isInstance(guild, class.classes.Guild) then
 		guild = guild.id
-	elseif type(guild) ~= string or not tonumber(guild) then
+	elseif type(guild) ~= 'string' or not tonumber(guild) then
 		err = format('Guild provided must be a string id or guild object. Got %q. Type:%q', guild, type(guild))
 	end
 	if err ~= '' then return false, err end
@@ -145,26 +158,30 @@ end
 function CommandManager:SetGuildPrefix(guild, prefix)
 	--Attempt to get the guild based on id/object
 	local succ, guildToRegister = getGuild(guild)
-	if not succ then return self:Error(guildToRegister) end
+	if not succ then return false, guildToRegister end
 	--Then we check if the prefix is valid and error accordingly.
+	if prefix == nil then self._guildPrefixes[guildToRegister] = '' return end
 	if type(prefix) ~= 'string' then
-		return self:Error(format('Guild (%q) prefix must be a string. Got %q', guild, type(prefix) ))
+		return false, format('Guild (%q) prefix must be a string. Got %q', guild, type(prefix))
 	end
 	--If we made it here, we have good prefix!
 	self._guildPrefixes[guildToRegister] = prefix
+	return true
 end
 
 
 function CommandManager:RemoveGuildPrefix(guild)
 	local succ, guildToDelete = getGuild(guild)
-	if not succ then return self:Error(guildToDelete) end
+	if not succ then return false, guildToDelete end
 	self._guildPrefixes[guildToDelete] = nil
+	return true
  end
 
  function CommandManager:GetPrefix(msg)
  	if not msg or not class.isInstance(msg, class.classes.Message) then return nil end
  	--Get the prefix for the current context.
  	local pre = msg.guild and self._guildPrefixes[msg.guild.id] or self._globalPrefix
+	if pre == '' then return nil end
 	return pre
 end
 
@@ -258,7 +275,7 @@ end
 
 --Remove command from handler
 function CommandManager:Remove(command)
-	if type(command) == 'table' and class.isInstance(command, Command) then
+	if class.isInstance(command, Command) then
 		self:_RemoveAliases(command, command.aliases)
 		local name = command.ignoreCase and command.name:lower() or command.name
 		local key = tblFind(self._commands[name], command)
@@ -360,13 +377,18 @@ end
 function CommandManager:LoadCommands(filepath)
 	local str, err = fs.readFileSync(filepath)
 	if not str then return self:Error(err) end
-	local func,err = loadstring(str)
+	local func,err = loadstring(str, '='..filepath:match("/?([^/]*)$"))
 	if not func then return self:Error(err) end
 	local env = extensions.copy(baseEnv)
 
 	for k,v in pairs(self._globals) do
 		env[k] = v
 	end
+
+	for k,v in pairs(Command._optionTypes) do
+		env[k] = self._defaultOptions[k]
+	end
+
 	local comTbl = {}
 	local comCount = 1
 
@@ -375,7 +397,7 @@ function CommandManager:LoadCommands(filepath)
 		local com, err = self:Create(newEnv)
 		if not com then return self:Error(format("Error in generating command #%d from file: %s\nError: %s", comCount, filepath, err)) end
 		for k,v in pairs(Command._optionTypes) do
-			newEnv[k] = nil
+			newEnv[k] = self._defaultOptions[k]
 		end
 		table.insert(comTbl, com)
 		comCount = comCount + 1

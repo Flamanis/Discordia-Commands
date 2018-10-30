@@ -1,6 +1,6 @@
 local debug = debug
 local class = require('discordia').class
-local extensions = require('./extensions')
+local extensions = require('./Extensions')
 local Command, get, set = class('Command')
 Command._description = "A command object for Flamanis's Command Manager"
 
@@ -81,8 +81,14 @@ paramNames - The names of the parameters as displayed in the code, lower
 --[[
 Command Methods, pretty much all of these are run when you make your command
 They return the command object itself so you can chain them. If you wanna.
-setParametersOptions - Sets parameter options, type, optional, remainder.
-SetParameterOptions ^ but for one
+SetParametersOptions - Parameter Option Table - Sets parameter options, type, optional, remainder.
+SetParameterOptions - String parameterIdentifier, Table - ^ but for one
+SetLongDescription/Usage/Description - String - Sets the various values
+AddPreconditions - PreconditionOptions Table - Adds preconditions to the command
+RemovePreconditions - String Table - Removes preconditions from the command
+
+
+
 
 ]]
 
@@ -191,7 +197,7 @@ local function getArg(tbl,numOrName)
 end
 
 
-function Command:SetParametersOptions(paramTbl)
+function Command:SetParameterOptions(paramTbl)
 	--Make sure that the input is a table
 	if type(paramTbl) ~= 'table' then
 		paramTbl = {paramTbl}
@@ -248,12 +254,9 @@ function Command:SetParametersOptions(paramTbl)
 	return self
 end
 
-function Command:SetParameterOptions(param, options)
-	return self:SetParametersOptions({[param] = options})
-end
-
 function Command:AddPreconditions(preconditions)
 	if preconditions == nil then return end
+	if type(preconditions) == 'string' then preconditions = {preconditions} end
 	for k,v in pairs(preconditions) do
 		if type(v) == 'string' then
 			table.insert(self._preconditions,{v})
@@ -391,7 +394,7 @@ function Command:_Run(client, message, args)
 	fenv.context = context
 	setfenv(self._func, fenv)
 	local succ, ret = pcall(self._func, table.unpack(args))
-	if not succ then self._manager:fail(ret) end
+	if not succ then self._manager:Error(ret) end
 end
 
 
